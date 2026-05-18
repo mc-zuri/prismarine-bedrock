@@ -184,8 +184,21 @@ function loadMergedWorld () {
   if (mergedWorld) return mergedWorld
   const data = JSON.parse(fs.readFileSync(WORLD_PATH, 'utf8'))
   const map = new Map()
-  for (const [x, y, z, pi] of data.blocks) {
-    map.set(x + ',' + y + ',' + z, data.palette[pi])
+  if (data.fills) {
+    for (const [x0, y0, z0, x1, y1, z1, pi] of data.fills) {
+      const block = data.palette[pi]
+      for (let y = y0; y <= y1; y++) {
+        for (let z = z0; z <= z1; z++) {
+          for (let x = x0; x <= x1; x++) {
+            map.set(x + ',' + y + ',' + z, block)
+          }
+        }
+      }
+    }
+  } else if (data.blocks) {
+    for (const [x, y, z, pi] of data.blocks) {
+      map.set(x + ',' + y + ',' + z, data.palette[pi])
+    }
   }
   mergedWorld = { map }
   return mergedWorld
