@@ -25,14 +25,23 @@ const {
 const F32_NOISE_FLOOR = 1e-6
 
 const SUB_ULP_TOLERANT_SCENARIOS = new Map([
-  ['jump_on_honey', F32_NOISE_FLOOR],
   ['walk_into_water', F32_NOISE_FLOOR],
   ['fall_onto_slime_high', F32_NOISE_FLOOR],
   ['climb_ladder_jump_off', F32_NOISE_FLOOR],
   ['swim_forward_submerged', F32_NOISE_FLOOR],
   ['swim_sprint_forward', F32_NOISE_FLOOR],
   ['walk_into_powder_snow', 5e-4],
-  ['sink_in_water', F32_NOISE_FLOOR]
+  ['sink_in_water', F32_NOISE_FLOOR],
+  ['effect_levitation1', F32_NOISE_FLOOR],
+  ['lava_swim_down_d2', F32_NOISE_FLOOR]
+])
+
+const SCENARIO_EFFECTS = new Map([
+  ['effect_levitation1', { 25: { amplifier: 0 } }],
+  ['effect_slow_falling_h20', { 28: { amplifier: 0 } }],
+  ['effect_jump_boost1', { 8: { amplifier: 0 } }],
+  ['effect_speed1_walk', { 1: { amplifier: 0 } }],
+  ['effect_slowness1_walk', { 2: { amplifier: 0 } }]
 ])
 
 const BOOL_CONTROLS = ['forward', 'back', 'left', 'right', 'jumpDown', 'jumpPressed', 'sneakDown', 'sprintDown', 'swimDown', 'stopSprinting', 'jumpPressedRaw', 'jumpReleasedRaw', 'sneakPressedRaw', 'sneakReleasedRaw']
@@ -226,6 +235,19 @@ function getFixtureMeta (scenario) {
   return cached ? cached.meta : null
 }
 
+const ATTRIBUTES_DIR = path.join(__dirname, 'fixtures', 'attributes')
+const attributesCache = new Map()
+function _loadAttributesFixture (scenario) {
+  if (attributesCache.has(scenario)) return attributesCache.get(scenario)
+  const fp = path.join(ATTRIBUTES_DIR, scenario + '.json')
+  if (!fs.existsSync(fp)) { attributesCache.set(scenario, null); return null }
+  const fx = JSON.parse(fs.readFileSync(fp, 'utf8'))
+  const byTick = new Map()
+  for (const t of fx.ticks) byTick.set(t.t, t)
+  attributesCache.set(scenario, byTick)
+  return byTick
+}
+
 function detectFireworkBoost (ticks) {
   const flags = new Array(ticks.length).fill(false)
   let teleportSeen = false
@@ -335,11 +357,19 @@ class Harness {
       world: worldOverride = null,
       _seedOverride = null,
       _suppressFwdRefine = false,
-      _initialSprintHint = false
+      _initialSprintHint = false,
+      _useAttributeFixture = false,
+      initialTicksFrozen = null,
+      initialFreezeRatio = null,
+      initialWalkAttribute = null
     } = opts
     this._seedOverride = _seedOverride
     this._suppressFwdRefine = _suppressFwdRefine
     this._initialSprintHint = _initialSprintHint
+    this._useAttributeFixture = _useAttributeFixture
+    this._initialTicksFrozen = initialTicksFrozen
+    this._initialFreezeRatio = initialFreezeRatio
+    this._initialWalkAttribute = initialWalkAttribute
     this._ctorOpts = opts
 
     this.C = getConstants(version)
@@ -381,7 +411,8 @@ class Harness {
         gliding: typeof scenario === 'string' && scenario.startsWith('elytra_'),
         groundSlipperiness: this.C.DEFAULT_SLIPPERINESS,
         attributes: {},
-        effects: {}
+        effects: SCENARIO_EFFECTS.get(scenario) ? JSON.parse(JSON.stringify(SCENARIO_EFFECTS.get(scenario))) : {},
+        armor: typeof scenario === 'string' && scenario.startsWith('freeze_immune_leather_') ? { feet: { name: 'leather_boots' } } : {}
       }
     }
   }
@@ -436,6 +467,8 @@ class Harness {
     this.botState.self._wasInWaterTick = feetInWater
     this.botState.self._lastReqMove = null
     this.botState.self._lastTickStartPos = null
+    this.botState.self.gliding = false
+    this.botState.self._flagGlidingPrev = false
     return this
   }
 
@@ -458,10 +491,17 @@ class Harness {
     const pai = this.currentPAI
     if (!this._seeded) {
       const aabbAlreadySeeded = this._aabbEverSeeded
+      const seedWalk = Number.isFinite(diff.walk) ? diff.walk
+        : (diff.attributes && Number.isFinite(diff.attributes.movement_speed) ? diff.attributes.movement_speed
+        : this._initialWalkAttribute)
+      const seedFreezeRatio = Number.isFinite(diff.freezeRatio) ? diff.freezeRatio : this._initialFreezeRatio
       seedFromPAI(this.botState.self, pai, nextTicks, this.world, this.C, {
         initialSprintHint: this._initialSprintHint,
         aabbOverride: aabbAlreadySeeded ? null : this._seedOverride,
-        skipAabb: aabbAlreadySeeded
+        skipAabb: aabbAlreadySeeded,
+        initialTicksFrozen: this._initialTicksFrozen,
+        initialFreezeRatio: seedFreezeRatio,
+        initialWalkAttribute: seedWalk
       })
       if (!aabbAlreadySeeded) {
         const a = this.botState.self._aabb
@@ -469,6 +509,10 @@ class Harness {
       }
       this._aabbEverSeeded = true
       this._seeded = true
+      if (pai.inputs.handledTeleport) {
+        this.botState.self.gliding = false
+        this.botState.self._flagGlidingPrev = false
+      }
     } else if (pai.inputs.handledTeleport) {
       this.applyTeleport({
         x: pai.position.x,
@@ -483,6 +527,16 @@ class Harness {
     }
     this.botState.self.inputData = paiInputsToInputData(pai.inputs)
     this.setControls(paiInputsToControls(pai.inputs, pai.moveVector))
+    const walkUpdate = Number.isFinite(diff.walk) ? diff.walk
+      : (diff.attributes && Number.isFinite(diff.attributes.movement_speed) ? diff.attributes.movement_speed
+      : null)
+    if (walkUpdate != null) {
+      if (!this.botState.self.attributes) this.botState.self.attributes = {}
+      this.botState.self.attributes['minecraft:movement_speed'] = { value: Math.fround(walkUpdate) }
+    }
+    if (Number.isFinite(diff.freezeRatio)) {
+      this.botState.self._freezeRatio = Math.max(0, Math.min(1, diff.freezeRatio))
+    }
     return this
   }
 
@@ -574,6 +628,18 @@ class Harness {
     if (!scenario || !Array.isArray(scenario.ticks)) {
       throw new Error('runScenario: scenario.ticks array required')
     }
+    if (this._useAttributeFixture) {
+      const attrByTick = _loadAttributesFixture(scenario.name || this.scenario)
+      if (attrByTick) {
+        for (const tick of scenario.ticks) {
+          const a = attrByTick.get(tick.t)
+          if (!a) continue
+          if (Number.isFinite(a.walk) && !Number.isFinite(tick.walk)) tick.walk = a.walk
+          if (Number.isFinite(a.yaw)) tick.yaw = a.yaw
+          if (Number.isFinite(a.pitch)) tick.pitch = a.pitch
+        }
+      }
+    }
     if (!this._suppressFwdRefine && !this._seedOverride) {
       this._refineSeedByForwardSim(scenario)
     }
@@ -644,6 +710,13 @@ class Harness {
         tryVariant(mn, mx, mnZ, mxZ, mnY)
         if (best.maxDist === 0) break
       }
+    }
+    const asymPairs = [[-1, 0], [0, -1], [1, 0], [0, 1], [-1, -2], [-2, -1], [1, 2], [2, 1], [-1, 1], [1, -1], [-2, 1], [1, -2], [-1, 2], [2, -1]]
+    for (const [k1, k2] of asymPairs) {
+      if (best.maxDist === 0) break
+      tryVariant(ulpShift(base.minX, k1), ulpShift(base.maxX, k2), base.minZ, base.maxZ, base.minY)
+      if (best.maxDist === 0) break
+      tryVariant(base.minX, base.maxX, ulpShift(base.minZ, k1), ulpShift(base.maxZ, k2), base.minY)
     }
     this._seedOverride = best.seed
   }

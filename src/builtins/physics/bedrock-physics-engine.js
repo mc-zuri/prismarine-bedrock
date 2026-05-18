@@ -222,13 +222,16 @@ function seedFromPAI (self, frame0Pai, nextFrames, world, C, options = {}) {
   const initialSprintHint = !!options.initialSprintHint
   const aabbOverride = options.aabbOverride || null
   const skipAabb = !!options.skipAabb
+  const initialTicksFrozen = Number.isFinite(options.initialTicksFrozen) ? options.initialTicksFrozen : null
+  const initialFreezeRatio = Number.isFinite(options.initialFreezeRatio) ? options.initialFreezeRatio : null
+  const initialWalkAttribute = Number.isFinite(options.initialWalkAttribute) ? options.initialWalkAttribute : null
   const pai = frame0Pai
   self.position.x = pai.position.x
   self.position.y = pai.position.y - C.EYE_HEIGHT
   self.position.z = pai.position.z
-  self.velocity.x = pai.delta?.x ?? 0
-  self.velocity.y = pai.delta?.y ?? 0
-  self.velocity.z = pai.delta?.z ?? 0
+  self.velocity.x = f(pai.delta?.x ?? 0)
+  self.velocity.y = f(pai.delta?.y ?? 0)
+  self.velocity.z = f(pai.delta?.z ?? 0)
   if (pai.yaw != null) self.yaw = pai.yaw
   if (pai.pitch != null) self.pitch = pai.pitch
   self.onGround = !!pai.inputs?.verticalCollision
@@ -316,6 +319,18 @@ function seedFromPAI (self, frame0Pai, nextFrames, world, C, options = {}) {
     self.inputState.prevButtons.jump.current = !!inp.jumping
     self.inputState.prevButtons.sneak.current = !!inp.sneakDown
   }
+
+  if (initialTicksFrozen != null) {
+    self._ticksFrozen = Math.max(0, Math.min(140, Math.round(initialTicksFrozen)))
+    self._freezeRatio = self._ticksFrozen / 140
+  }
+  if (initialFreezeRatio != null) {
+    self._freezeRatio = Math.max(0, Math.min(1, initialFreezeRatio))
+  }
+  if (initialWalkAttribute != null) {
+    if (!self.attributes) self.attributes = {}
+    self.attributes['minecraft:movement_speed'] = { value: f(initialWalkAttribute) }
+  }
 }
 
 function createBedrockPhysicsEngine (options = {}) {
@@ -352,7 +367,7 @@ function createBedrockPhysicsEngine (options = {}) {
       self.position.z !== self._aabbAnchorZ
     )
     const preMoveAABB = externallyMoved ? { ...self._aabb } : null
-    if (externallyMoved) self._freezeRatio = 0
+    if (externallyMoved) { self._freezeRatio = 0; self._ticksFrozen = 0 }
     if (jumpPressed && externallyMoved) {
       const belowName = getBlock(world, new Vec3(self.position.x, self.position.y - 0.1, self.position.z))?.name || ''
       if (belowName === 'honey_block' || belowName === 'slime' || belowName === 'slime_block') {
@@ -389,6 +404,7 @@ function createBedrockPhysicsEngine (options = {}) {
     self.isInLava = self.inLava
     self._wasInWaterPrev = wasInWaterForSprint
     self._wasInWaterTick = !!self.isInWater
+    if (self.isInWater && !self.flying) applyWaterFlowImpulse(self, world)
 
     // SwimAmount tracking — BDS's SwimAmountComponent.current ticks 0.1
     // toward 1 when the player's head is in water, toward 0 otherwise.
@@ -689,11 +705,8 @@ function createBedrockPhysicsEngine (options = {}) {
     self._powderSnowSlowdownPending = powderSnowInInnerAABB(self, world)
     self._berryBushSlowdownPending = berryBushInInnerAABB(self, world)
     const prevFreeze = Number(self._freezeRatio) || 0
-    if (powderSnowPending) {
-      self._freezeRatio = Math.min(1, prevFreeze + (1 / 10))
-    } else {
-      self._freezeRatio = Math.max(0, prevFreeze - (1 / 10))
-    }
+    if (powderSnowPending) self._freezeRatio = Math.min(1, prevFreeze + (1 / 10))
+    else self._freezeRatio = Math.max(0, prevFreeze - (1 / 10))
     self.prevVelocity = previousVelocity
     self._hColPrev2 = !!self._hColPrev
     self._hColPrev = !!self.horizontalCollision
@@ -841,7 +854,7 @@ function applyJump (self, controls, input, velocity, C, world, climbableType, ju
   }
   if (jumpTrigger) {
     if (self.touchingWater || self.isInWater || self.inLava || self.isInLava) {
-      velocity.y += C.FLUID_BUOYANCY_Y
+      velocity.y = f(velocity.y + f(C.FLUID_BUOYANCY_Y))
     } else if (climbableType) {
       const climbY = f(getClimbSpeed(climbableType))
       if (velocity.y < climbY) velocity.y = climbY
@@ -876,27 +889,31 @@ function applyRelativeMovement (self, input, velocity, C) {
   return velocity
 }
 
-const SOUL_SAND_FRICTION_MULT = f(1.225)
-
 function getFrictionInfluencedSpeed (self, C) {
-  let base = getMovementSpeed(self, C)
-
-  if (self.isUsingItem || self.usingHeldItem) base *= C.USING_ITEM_SCALE
-  const sprintActive = self._sprintForSpeed && !self.sneaking
-  if (sprintActive) base *= 1.3
-
-  if (self.isUnderWater || self.isInLava || (self._flagSwimming && self._swimSkipGravity)) return C.AIR_ACCEL_WALK
-  if (!self.onGround) return sprintActive ? C.AIR_ACCEL_SPRINT : C.AIR_ACCEL_WALK
-
-  let slipperiness = Number.isFinite(self.groundSlipperiness)
+  const attr =
+    self.attributes?.['minecraft:movement_speed'] ||
+    self.attributes?.movement ||
+    self.attributes?.movement_speed
+  const walkValue = Number(attr?.value ?? attr?.current ?? attr ?? C.PLAYER_SPEED ?? 0.1)
+  const speedLvl = getEffectLevel(self, 'speed', 1)
+  const slowLvl = getEffectLevel(self, 'slowness', 2)
+  const freezeRatio = Number(self._freezeRatio) || 0
+  const usingItem = !!(self.isUsingItem || self.usingHeldItem)
+  const sprintActive = !!(self._sprintForSpeed && !self.sneaking)
+  const isUnderWater = !!self.isUnderWater
+  const isInLava = !!self.isInLava
+  const swimSkip = !!(self._flagSwimming && self._swimSkipGravity)
+  const onGround = !!self.onGround
+  const slipperiness = Number.isFinite(self.groundSlipperiness)
     ? self.groundSlipperiness
     : C.DEFAULT_SLIPPERINESS
-  if (self._tickGroundBlock?.name === 'soul_sand') slipperiness = f(slipperiness * SOUL_SAND_FRICTION_MULT)
-
-  const fricConst = f(f(slipperiness) * f(C.AIR_FRICTION_XZ))
-  const ratio = f(f(C.GROUND_FRICTION_XZ) / fricConst)
-  const ratio3 = f(f(ratio * ratio) * ratio)
-  return f(ratio3 * f(base))
+  const isSoulSand = self._tickGroundBlock?.name === 'soul_sand'
+  return native.frictionInfluencedSpeed(
+    walkValue, speedLvl | 0, slowLvl | 0, freezeRatio,
+    usingItem, sprintActive,
+    isUnderWater, isInLava, swimSkip,
+    onGround, slipperiness, isSoulSand
+  )
 }
 
 function getMovementSpeed (self, C) {
@@ -904,12 +921,11 @@ function getMovementSpeed (self, C) {
     self.attributes?.['minecraft:movement_speed'] ||
     self.attributes?.movement ||
     self.attributes?.movement_speed
-
   const value = Number(attr?.value ?? attr?.current ?? attr ?? C.PLAYER_SPEED ?? 0.1)
-  let speed = value * (1 + 0.2 * getEffectLevel(self, 'speed', 1) - 0.15 * getEffectLevel(self, 'slowness', 2))
+  const speedLvl = getEffectLevel(self, 'speed', 1)
+  const slowLvl = getEffectLevel(self, 'slowness', 2)
   const freezeRatio = Number(self._freezeRatio) || 0
-  if (freezeRatio > 0) speed = speed * (1 - 0.05 * Math.min(1, freezeRatio))
-  return Math.max(0, speed)
+  return native.movementSpeed(value, speedLvl | 0, slowLvl | 0, freezeRatio)
 }
 
 function getJumpBoost (self) {
@@ -964,7 +980,7 @@ function applyPostMoveVelocity (self, velocity, world, C) {
 
   if (!self.flying && !self.scaffoldDescend) {
     const levitation = getEffectLevel(self, 'levitation', 25)
-    if (levitation > 0) velocity.y = f(velocity.y + f((0.05 * levitation - velocity.y) * 0.2))
+    if (levitation > 0) velocity.y = f(velocity.y + f(f(f(0.05) * levitation - velocity.y) * f(0.2)))
     else velocity.y = f(velocity.y - f(getGravity(self, C)))
   }
 
@@ -994,7 +1010,7 @@ function applyPostMoveVelocity (self, velocity, world, C) {
 }
 
 function getGravity (self, C) {
-  if (getEffectLevel(self, 'slowFalling', 28) > 0 && self.velocity.y <= 0) return C.SLOW_FALLING_GRAVITY ?? C.GRAVITY / 8
+  if (getEffectLevel(self, 'slowFalling', 28) > 0 && self.velocity.y < 0) return C.SLOW_FALLING_GRAVITY ?? C.GRAVITY / 8
   return C.GRAVITY
 }
 
@@ -1068,13 +1084,13 @@ function applySneakEdgeClamp (self, requestedMove, velocity, controls, world, st
 
 function moveWithCollisions (self, movement, world, stepHeight) {
   const box = getPlayerAABB(self)
-  let adjusted = collideMovement(box.clone(), movement, world)
+  let adjusted = collideMovement(box.clone(), movement, world, self)
   const verticalCollision = movement.y !== adjusted.y
   const horizontalCollision = movement.x !== adjusted.x || movement.z !== adjusted.z
   const canStep = (self.onGround || (verticalCollision && movement.y < 0)) && horizontalCollision
 
   if (canStep) {
-    const stepped = tryStepMove(box, movement, adjusted, world, stepHeight)
+    const stepped = tryStepMove(box, movement, adjusted, world, stepHeight, self)
     if (horizontalLengthSquared(stepped) > horizontalLengthSquared(adjusted)) adjusted = stepped
   }
 
@@ -1085,15 +1101,15 @@ function moveWithCollisions (self, movement, world, stepHeight) {
   }
 }
 
-function tryStepMove (box, movement, current, world, stepHeight) {
+function tryStepMove (box, movement, current, world, stepHeight, self) {
   const horizontal = new Vec3(movement.x, 0, movement.z)
-  let step = collideMovement(box.clone(), new Vec3(horizontal.x, stepHeight, horizontal.z), world)
+  let step = collideMovement(box.clone(), new Vec3(horizontal.x, stepHeight, horizontal.z), world, self)
 
   const stretched = box.clone().extend(horizontal.x, 0, horizontal.z)
-  const maxStepUp = collideMovement(stretched, new Vec3(0, stepHeight, 0), world).y
+  const maxStepUp = collideMovement(stretched, new Vec3(0, stepHeight, 0), world, self).y
   if (maxStepUp < stepHeight) {
     const raisedBox = box.clone().translate(0, maxStepUp, 0)
-    const adjustedHorizontal = collideMovement(raisedBox, horizontal, world)
+    const adjustedHorizontal = collideMovement(raisedBox, horizontal, world, self)
     if (horizontalLengthSquared(adjustedHorizontal) > horizontalLengthSquared(step)) {
       step = new Vec3(adjustedHorizontal.x, adjustedHorizontal.y + maxStepUp, adjustedHorizontal.z)
     }
@@ -1102,7 +1118,7 @@ function tryStepMove (box, movement, current, world, stepHeight) {
   if (horizontalLengthSquared(step) <= horizontalLengthSquared(current)) return current
 
   const stepBox = box.clone().translate(step.x, step.y, step.z)
-  const remainingY = collideMovement(stepBox, new Vec3(0, movement.y - step.y, 0), world).y
+  const remainingY = collideMovement(stepBox, new Vec3(0, movement.y - step.y, 0), world, self).y
   return new Vec3(step.x, step.y + remainingY, step.z)
 }
 
@@ -1142,12 +1158,12 @@ function offsetZ (block, player, dz) {
   return dz
 }
 
-function collideMovement (box, movement, world) {
+function collideMovement (box, movement, world, self) {
   let x = movement.x
   let y = movement.y
   let z = movement.z
 
-  const collisions = getCollisionAABBs(world, box.clone().extend(x, y, z))
+  const collisions = getCollisionAABBs(world, box.clone().extend(x, y, z), self)
 
   if (y !== 0) {
     for (const blockBox of collisions) y = offsetY(blockBox, box, y)
@@ -1171,7 +1187,7 @@ function collideMovement (box, movement, world) {
   return new Vec3(x, y, z)
 }
 
-function getCollisionAABBs (world, searchBox) {
+function getCollisionAABBs (world, searchBox, self) {
   const boxes = []
   const minX = Math.floor(searchBox.minX - COLLISION_EPSILON)
   const minY = Math.floor(searchBox.minY - 0.5 - COLLISION_EPSILON)
@@ -1180,12 +1196,15 @@ function getCollisionAABBs (world, searchBox) {
   const maxY = Math.floor(searchBox.maxY + COLLISION_EPSILON)
   const maxZ = Math.floor(searchBox.maxZ + COLLISION_EPSILON)
 
+  const canStandOnPowderSnow = self?.armor?.feet?.name === 'leather_boots'
+  const entityMinY = self?._aabb?.minY
+
   for (let y = minY; y <= maxY; y++) {
     for (let z = minZ; z <= maxZ; z++) {
       for (let x = minX; x <= maxX; x++) {
         const pos = new Vec3(x, y, z)
         const block = getBlock(world, pos)
-        for (const shape of getBlockShapes(block)) {
+        for (const shape of getBlockShapes(block, pos, entityMinY, canStandOnPowderSnow)) {
           const blockBox = AABB.fromShape(shape, pos)
           if (blockBox.intersects(searchBox)) boxes.push(blockBox)
         }
@@ -1204,8 +1223,13 @@ function getBlock (world, pos) {
   }
 }
 
-function getBlockShapes (block) {
+function getBlockShapes (block, pos, entityMinY, canStandOnPowderSnow) {
   if (!block) return EMPTY_SHAPE
+  if (block?.name === 'powder_snow') {
+    if (!canStandOnPowderSnow || !pos || entityMinY == null) return EMPTY_SHAPE
+    if (entityMinY < pos.y + 1 - 1e-4) return EMPTY_SHAPE
+    return DEFAULT_BLOCK_SHAPE
+  }
   if (block.boundingBox === 'empty') return EMPTY_SHAPE
   if (block?.name === 'scaffolding') return EMPTY_SHAPE
   if (Array.isArray(block.shapes)) return block.shapes
@@ -1352,6 +1376,7 @@ function cobwebInAABB (aabb, world) {
 }
 
 function powderSnowInInnerAABB (self, world) {
+  if (self?.armor?.feet?.name === 'leather_boots') return false
   const aabb = self._aabb
   if (!aabb) return false
   const eps = 0.001
@@ -1534,6 +1559,133 @@ function liquidInInnerAABB (self, world, kind) {
     }
   }
   return false
+}
+
+function isWaterCell (world, x, y, z) {
+  const block = getBlock(world, new Vec3(x, y, z))
+  const n = block?.name
+  if (!n) return false
+  return n.includes('water') || n === 'bubble_column'
+}
+
+const LIQUID_FLOW_DX = [0, 0, -1, 1]
+const LIQUID_FLOW_DZ = [-1, 1, 0, 0]
+const LIQUID_FLOW_MAX_DEPTH = 7
+const LIQUID_FLOW_EPS = 0.000099999997
+const WATER_FLOW_STRENGTH = 0.014
+
+function liquidCellRenderedDepth (world, x, y, z, cache) {
+  const key = x + ',' + y + ',' + z
+  const cached = cache.get(key)
+  if (cached !== undefined) return cached
+  if (!isWaterCell(world, x, y, z)) {
+    cache.set(key, -1)
+    return -1
+  }
+  if (isWaterCell(world, x, y + 1, z)) {
+    cache.set(key, 0)
+    return 0
+  }
+  const visited = new Set()
+  visited.add(key)
+  let frontier = [[x, z]]
+  for (let d = 1; d <= LIQUID_FLOW_MAX_DEPTH; d++) {
+    const next = []
+    for (const [cx, cz] of frontier) {
+      for (let dir = 0; dir < 4; dir++) {
+        const nx = cx + LIQUID_FLOW_DX[dir]
+        const nz = cz + LIQUID_FLOW_DZ[dir]
+        const nk = nx + ',' + y + ',' + nz
+        if (visited.has(nk)) continue
+        if (!isWaterCell(world, nx, y, nz)) continue
+        visited.add(nk)
+        if (isWaterCell(world, nx, y + 1, nz)) {
+          cache.set(key, d)
+          return d
+        }
+        next.push([nx, nz])
+      }
+    }
+    if (next.length === 0) break
+    frontier = next
+  }
+  cache.set(key, LIQUID_FLOW_MAX_DEPTH)
+  return LIQUID_FLOW_MAX_DEPTH
+}
+
+function applyWaterFlowImpulse (self, world) {
+  const aabb = self._aabb
+  if (!aabb) return
+  const minX = aabb.minX + 0.001
+  const maxX = aabb.maxX - 0.001
+  const minY = aabb.minY + 0.401
+  const maxY = aabb.maxY - 0.401
+  const minZ = aabb.minZ + 0.001
+  const maxZ = aabb.maxZ - 0.001
+  const x0 = Math.floor(minX), x1 = Math.floor(maxX)
+  const y0 = Math.floor(minY), y1 = Math.floor(maxY)
+  const z0 = Math.floor(minZ), z1 = Math.floor(maxZ)
+  const cells = []
+  let hasFlowing = false
+  const depthCache = new Map()
+  for (let x = x0; x <= x1; x++) {
+    for (let y = y0; y <= y1; y++) {
+      for (let z = z0; z <= z1; z++) {
+        if (!isWaterCell(world, x, y, z)) continue
+        const depth = liquidCellRenderedDepth(world, x, y, z, depthCache)
+        cells.push({ x, y, z, depth })
+        if (depth > 0) hasFlowing = true
+      }
+    }
+  }
+  if (cells.length === 0) return
+  if (!hasFlowing) {
+    let adjacent = false
+    for (const lb of cells) {
+      for (let d = 0; d < 4 && !adjacent; d++) {
+        const nd = liquidCellRenderedDepth(world, lb.x + LIQUID_FLOW_DX[d], lb.y, lb.z + LIQUID_FLOW_DZ[d], depthCache)
+        if (nd > 0) adjacent = true
+      }
+      if (adjacent) break
+    }
+    if (!adjacent) return
+  }
+  let accumX = 0, accumZ = 0
+  for (const lb of cells) {
+    let bx = 0, bz = 0
+    for (let d = 0; d < 4; d++) {
+      const nx = lb.x + LIQUID_FLOW_DX[d]
+      const nz = lb.z + LIQUID_FLOW_DZ[d]
+      const nDepth = liquidCellRenderedDepth(world, nx, lb.y, nz, depthCache)
+      if (nDepth >= 0) {
+        const diff = nDepth - lb.depth
+        bx += LIQUID_FLOW_DX[d] * diff
+        bz += LIQUID_FLOW_DZ[d] * diff
+      } else {
+        const neighbor = getBlock(world, new Vec3(nx, lb.y, nz))
+        const nSolid = neighbor && neighbor.boundingBox === 'block'
+        if (!nSolid) {
+          const belowDepth = liquidCellRenderedDepth(world, nx, lb.y - 1, nz, depthCache)
+          if (belowDepth >= 0) {
+            const diff = belowDepth - lb.depth + 8
+            bx += LIQUID_FLOW_DX[d] * diff
+            bz += LIQUID_FLOW_DZ[d] * diff
+          }
+        }
+      }
+    }
+    const bmag = Math.sqrt(bx * bx + bz * bz)
+    if (bmag >= LIQUID_FLOW_EPS) {
+      const inv = 1 / bmag
+      accumX += bx * inv
+      accumZ += bz * inv
+    }
+  }
+  const mag = Math.sqrt(accumX * accumX + accumZ * accumZ)
+  if (mag < LIQUID_FLOW_EPS) return
+  const inv = 1 / mag
+  self.velocity.x = f(self.velocity.x + f(f(f(accumX) * f(inv)) * WATER_FLOW_STRENGTH))
+  self.velocity.z = f(self.velocity.z + f(f(f(accumZ) * f(inv)) * WATER_FLOW_STRENGTH))
 }
 
 function updateFluidAndClimbableState (self, world) {

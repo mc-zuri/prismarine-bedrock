@@ -72,7 +72,7 @@ const TICKS = [
 
 describe('physics: swim_forward_submerged', () => {
   it('matches recorded client state per tick', () => {
-    const h = makeHarness({ version: "1.26.10", scenario: 'swim_forward_submerged', softFailures: true })
+    const h = makeHarness({ version: "1.26.10", scenario: 'swim_forward_submerged', softFailures: true, _useAttributeFixture: true })
     h.runScenario({ name: 'swim_forward_submerged', ticks: TICKS })
   })
 })

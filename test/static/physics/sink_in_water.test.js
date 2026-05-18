@@ -103,7 +103,7 @@ const TICKS = [
 
 describe('physics: sink_in_water', () => {
   it('matches recorded client state per tick', () => {
-    const h = makeHarness({ version: "1.26.10", scenario: 'sink_in_water', softFailures: true })
+    const h = makeHarness({ version: "1.26.10", scenario: 'sink_in_water', softFailures: true, _useAttributeFixture: true })
     h.runScenario({ name: 'sink_in_water', ticks: TICKS })
   })
 })

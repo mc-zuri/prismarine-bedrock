@@ -3,5 +3,5 @@ allowBuilds:
   better-sqlite3: true
 overrides:
   prismarine-chunk: "github:GenerelSchwerz/prismarine-chunk#bedrock-1.26-compat"
-  bedrock-native-math: "link:D:/projects/bedrock-native-math"
+  bedrock-native-math: "github:mc-zuri/bedrock-native-math"
   minecraft-data: "github:mc-zuri/node-minecraft-data#bedrock-v2"

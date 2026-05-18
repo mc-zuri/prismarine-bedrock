@@ -72,7 +72,7 @@ const TICKS = [
 
 describe('physics: swim_sprint_forward', () => {
   it('matches recorded client state per tick', () => {
-    const h = makeHarness({ version: "1.26.10", scenario: 'swim_sprint_forward', softFailures: true })
+    const h = makeHarness({ version: "1.26.10", scenario: 'swim_sprint_forward', softFailures: true, _useAttributeFixture: true })
     h.runScenario({ name: 'swim_sprint_forward', ticks: TICKS })
   })
 })
