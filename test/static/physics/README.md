@@ -16,7 +16,8 @@ test/static/physics/
 ├── _helpers.js                        ← Harness + makeFixtureWorld + getInputAtTick
 ├── <scenario>.test.js                 ← one mocha test per scenario (×N)
 ├── fixtures/
-│   ├── worlds/<scenario>.json         ← block geometry around the player's path
+│   ├── world.json                     ← merged block geometry across all scenarios
+│   ├── merge-worlds.js                ← merge tool (worlds/<scenario>.json → world.json)
 │   └── inputs/<scenario>.json         ← per-tick PAI + harness controls
 └── reports/
     ├── README.md                      ← top-level scenario index
@@ -25,10 +26,12 @@ test/static/physics/
         └── tick_NNNN.md               ← one file per tick (×N)
 ```
 
-Three coupled artefacts per scenario: a `.test.js` (the assertion harness),
-a `fixtures/worlds/*.json` (collision geometry), and a
-`fixtures/inputs/*.json` (full per-tick PAI state). All three are
-regenerated from the same recording in one pass.
+Two coupled artefacts per scenario: a `.test.js` (the assertion harness) and
+a `fixtures/inputs/*.json` (full per-tick PAI state). Block geometry is
+stored once in `fixtures/world.json` — a lossless merge of the per-scenario
+block exports. All scenarios share this single world (`shared_world` from
+the recorder builds the same superflat layout for all takes), so dedup is
+zero-conflict.
 
 ---
 
@@ -93,11 +96,16 @@ npx tsx scripts/extract-physics-fixtures.ts \
     D:/projects/prismarine-bedrock/test/static/physics \
     1.26.0
 
-# 2. World fixtures (fixtures/worlds/*.json)
+# 2. World geometry (fixtures/world.json)
+# Step 2a: per-scenario worlds (intermediate output)
 cd D:/projects/mc/bedrock-oracle/tools/analyze-bin
 npx tsx src/main.ts \
     D:/traces/1.26.13.1/<basename>.proxy.bin \
     D:/projects/prismarine-bedrock/test/static/physics/fixtures/worlds
+# Step 2b: merge into single world.json, then drop the intermediate dir
+cd D:/projects/prismarine-bedrock
+node test/static/physics/fixtures/merge-worlds.js
+rm -rf test/static/physics/fixtures/worlds
 
 # 3. Per-tick system reports (reports/<scenario>/)
 cd D:/projects/mc/bedrock-oracle-v26
